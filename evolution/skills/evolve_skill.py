@@ -41,7 +41,7 @@ def evolve(
     optimizer_model: str = "openai/gpt-4.1",
     eval_model: str = "openai/gpt-4.1-mini",
     hermes_repo: Optional[str] = None,
-    run_tests: bool = False,
+    run_tests: bool = True,
     dry_run: bool = False,
     dataset_size: Optional[int] = None,
 ):
@@ -55,7 +55,9 @@ def evolve(
         judge_model=eval_model,  # Use same model for dataset generation
         run_pytest=run_tests,
     )
-    if dataset_size:
+    if dataset_size is not None:
+        if dataset_size < 3:
+            raise ValueError('dataset_size must be >= 3')
         config.eval_dataset_size = dataset_size
 
     # ── 1. Find and load the skill ──────────────────────────────────────
@@ -117,6 +119,8 @@ def evolve(
         sys.exit(1)
 
     console.print(f"  Split: {len(dataset.train)} train / {len(dataset.val)} val / {len(dataset.holdout)} holdout")
+    if not dataset.train or not dataset.val or not dataset.holdout:
+        raise ValueError("Evaluation requires non-empty train, val and holdout splits")
 
     # ── 3. Validate constraints on baseline ─────────────────────────────
     console.print(f"\n[bold]Validating baseline constraints[/bold]")
@@ -157,31 +161,17 @@ def evolve(
 
     start_time = time.time()
 
-    try:
-        # dspy.GEPA has no max_steps — the budget knobs are auto /
-        # max_full_evals / max_metric_calls (exactly one required).
-        optimizer = dspy.GEPA(
-            metric=skill_fitness_metric,
-            max_full_evals=iterations,
-            reflection_lm=make_lm(optimizer_model),
-        )
-
-        optimized_module = optimizer.compile(
-            baseline_module,
-            trainset=trainset,
-            valset=valset,
-        )
-    except Exception as e:
-        # Fall back to MIPROv2 if GEPA isn't available in this DSPy version
-        console.print(f"[yellow]GEPA not available ({e}), falling back to MIPROv2[/yellow]")
-        optimizer = dspy.MIPROv2(
-            metric=skill_fitness_metric,
-            auto="light",
-        )
-        optimized_module = optimizer.compile(
-            baseline_module,
-            trainset=trainset,
-        )
+    # Do not mask GEPA errors with an unrelated optimizer fallback.
+    optimizer = dspy.GEPA(
+        metric=skill_fitness_metric,
+        max_full_evals=iterations,
+        reflection_lm=make_lm(optimizer_model),
+    )
+    optimized_module = optimizer.compile(
+        baseline_module,
+        trainset=trainset,
+        valset=valset,
+    )
 
     elapsed = time.time() - start_time
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
@@ -214,7 +204,9 @@ def evolve(
     # Guardrail: full hermes-agent test suite gate (README rule 1)
     if config.run_pytest and config.hermes_agent_path:
         console.print("\n[bold]Running hermes-agent test suite[/bold]")
-        test_result = validator.run_test_suite(config.hermes_agent_path)
+        test_result = validator.run_test_suite(
+            config.hermes_agent_path, candidate_path=skill_path, candidate_text=evolved_full
+        )
         icon = "✓" if test_result.passed else "✗"
         console.print(f"  {icon} {test_result.constraint_name}: {test_result.message}")
         if not test_result.passed:
@@ -318,11 +310,11 @@ def evolve(
 @click.option("--eval-source", default="synthetic", type=click.Choice(["synthetic", "golden", "sessiondb"]),
               help="Source for evaluation dataset")
 @click.option("--dataset-path", default=None, help="Path to existing eval dataset (JSONL)")
-@click.option("--dataset-size", default=None, type=int, help="Total eval examples to generate (default 20)")
+@click.option("--dataset-size", default=None, type=click.IntRange(min=3), help="Total eval examples to generate (default 20)")
 @click.option("--optimizer-model", default="openai/gpt-4.1", help="Model for GEPA reflections")
 @click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model for evaluations")
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
-@click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
+@click.option("--run-tests/--no-run-tests", default=True, help="Run full pytest suite against the isolated candidate (default: on)")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
 def main(skill, iterations, eval_source, dataset_path, dataset_size, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""

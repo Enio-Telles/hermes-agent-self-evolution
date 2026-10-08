@@ -26,7 +26,6 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
-    "optuna>=3.0",  # required by the MIPROv2 fallback optimizer
 ]
 darwinian = [
     "darwinian-evolver",
