@@ -173,7 +173,7 @@ def make_skill_metric(config: EvolutionConfig, skill_text: str, mode: str = "jud
             task_input=str(getattr(example, "task_input", "")),
             expected_behavior=str(getattr(example, "expected_behavior", "")),
             agent_output=output,
-            skill_text=skill_text,
+            skill_text=str(getattr(prediction, "skill_text", skill_text)),
         )
         feedback = result.feedback.strip() or (
             "Review correctness, procedure compliance and conciseness."

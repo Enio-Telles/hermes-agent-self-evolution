@@ -19,7 +19,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path, make_lm
+from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path, make_lm, require_approved_model_egress
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import make_skill_metric
@@ -48,6 +48,7 @@ def evolve(
     dataset_size: Optional[int] = None,
     metric_mode: str = "judge",
     min_improvement: float = 0.02,
+    allow_remote_data: bool = False,
 ):
     """Main evolution function — orchestrates the full optimization loop."""
 
@@ -55,6 +56,8 @@ def evolve(
         raise ValueError("metric_mode must be judge or heuristic")
     if not 0 < min_improvement <= 1:
         raise ValueError("min_improvement must be in (0, 1]")
+    if not dry_run:
+        require_approved_model_egress(allow_remote_data=allow_remote_data)
 
     config = EvolutionConfig(
         hermes_agent_path=resolve_hermes_agent_path(hermes_repo),
@@ -371,12 +374,13 @@ def evolve(
 @click.option("--dataset-size", default=None, type=click.IntRange(min=3), help="Total eval examples to generate (default 20)")
 @click.option("--metric-mode", type=click.Choice(["judge", "heuristic"]), default="judge", help="Judge returns semantic feedback; heuristic is non-promotable")
 @click.option("--min-improvement", type=click.FloatRange(min=0, max=1, min_open=True), default=0.02, help="Minimum absolute holdout gain before manual review")
+@click.option("--allow-remote-data", is_flag=True, help="Permit skill/task/output data to reach an approved remote model provider")
 @click.option("--optimizer-model", default="openai/gpt-4.1", help="Model for GEPA reflections")
 @click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model for evaluations")
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests/--no-run-tests", default=True, help="Run full pytest suite against the isolated candidate (default: on)")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
-def main(skill, iterations, eval_source, dataset_path, dataset_size, metric_mode, min_improvement, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
+def main(skill, iterations, eval_source, dataset_path, dataset_size, metric_mode, min_improvement, allow_remote_data, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
         skill_name=skill,
@@ -386,6 +390,7 @@ def main(skill, iterations, eval_source, dataset_path, dataset_size, metric_mode
         dataset_size=dataset_size,
         metric_mode=metric_mode,
         min_improvement=min_improvement,
+        allow_remote_data=allow_remote_data,
         optimizer_model=optimizer_model,
         eval_model=eval_model,
         hermes_repo=hermes_repo,

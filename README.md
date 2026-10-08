@@ -92,6 +92,14 @@ does not by itself establish that the evolved skill's behavior is correct.
 
 The default skill optimization metric uses `LLMJudge` to produce a structured
 correctness/procedure/conciseness score plus **textual feedback** for GEPA.
+Each judgment receives the instructions actually used by that prediction,
+including the evolved candidate's instructions.
+
+The skill optimizer refuses model data egress by default. Set
+`HERMES_EVOLVE_API_BASE` to a loopback URL for a local provider, or supply
+`--allow-remote-data` **only after** approving the remote model destination
+for the skill text, evaluation tasks, and model outputs. This preflight is
+not a sandbox and does not govern unrelated model callers.
 This sends the approved evaluation tasks, outputs and original skill instructions
 to the configured evaluation model; review data sensitivity and provider routing
 before running with real sessions. Avoid sensitive/secret-containing datasets.

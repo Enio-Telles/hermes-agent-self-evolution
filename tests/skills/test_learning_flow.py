@@ -22,6 +22,7 @@ def test_skill_attempt_tracks_governance_and_preserves_original(
     monkeypatch, tmp_path, run_tests, test_success, expected_reason
 ):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HERMES_EVOLVE_API_BASE", "http://127.0.0.1:8090/v1")
     repo = tmp_path / "hermes-agent"
     skill = repo / "skills" / "demo" / "SKILL.md"
     skill.parent.mkdir(parents=True)
