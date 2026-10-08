@@ -18,7 +18,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path
+from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path, make_lm
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
 from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore
@@ -43,6 +43,7 @@ def evolve(
     hermes_repo: Optional[str] = None,
     run_tests: bool = False,
     dry_run: bool = False,
+    dataset_size: Optional[int] = None,
 ):
     """Main evolution function — orchestrates the full optimization loop."""
 
@@ -54,6 +55,8 @@ def evolve(
         judge_model=eval_model,  # Use same model for dataset generation
         run_pytest=run_tests,
     )
+    if dataset_size:
+        config.eval_dataset_size = dataset_size
 
     # ── 1. Find and load the skill ──────────────────────────────────────
     console.print(f"\n[bold cyan]🧬 Hermes Agent Self-Evolution[/bold cyan] — Evolving skill: [bold]{skill_name}[/bold]\n")
@@ -118,7 +121,9 @@ def evolve(
     # ── 3. Validate constraints on baseline ─────────────────────────────
     console.print(f"\n[bold]Validating baseline constraints[/bold]")
     validator = ConstraintValidator(config)
-    baseline_constraints = validator.validate_all(skill["body"], "skill")
+    # Validate the full file (raw), not the body: skill_structure requires
+    # the YAML frontmatter that load_skill strips off.
+    baseline_constraints = validator.validate_all(skill["raw"], "skill")
     all_pass = True
     for c in baseline_constraints:
         icon = "✓" if c.passed else "✗"
@@ -137,7 +142,7 @@ def evolve(
     console.print(f"  Eval model: {eval_model}")
 
     # Configure DSPy
-    lm = dspy.LM(eval_model)
+    lm = make_lm(eval_model)
     dspy.configure(lm=lm)
 
     # Create the baseline skill module
@@ -153,9 +158,12 @@ def evolve(
     start_time = time.time()
 
     try:
+        # dspy.GEPA has no max_steps — the budget knobs are auto /
+        # max_full_evals / max_metric_calls (exactly one required).
         optimizer = dspy.GEPA(
             metric=skill_fitness_metric,
-            max_steps=iterations,
+            max_full_evals=iterations,
+            reflection_lm=make_lm(optimizer_model),
         )
 
         optimized_module = optimizer.compile(
@@ -185,7 +193,7 @@ def evolve(
 
     # ── 7. Validate evolved skill ───────────────────────────────────────
     console.print(f"\n[bold]Validating evolved skill[/bold]")
-    evolved_constraints = validator.validate_all(evolved_body, "skill", baseline_text=skill["body"])
+    evolved_constraints = validator.validate_all(evolved_full, "skill", baseline_text=skill["raw"])
     all_pass = True
     for c in evolved_constraints:
         icon = "✓" if c.passed else "✗"
@@ -202,6 +210,18 @@ def evolve(
         output_path.write_text(evolved_full)
         console.print(f"  Saved failed variant to {output_path}")
         return
+
+    # Guardrail: full hermes-agent test suite gate (README rule 1)
+    if config.run_pytest and config.hermes_agent_path:
+        console.print("\n[bold]Running hermes-agent test suite[/bold]")
+        test_result = validator.run_test_suite(config.hermes_agent_path)
+        icon = "✓" if test_result.passed else "✗"
+        console.print(f"  {icon} {test_result.constraint_name}: {test_result.message}")
+        if not test_result.passed:
+            if test_result.details:
+                console.print(f"  {test_result.details}")
+            console.print("[red]✗ Test suite FAILED — not deploying[/red]")
+            return
 
     # ── 8. Evaluate on holdout set ──────────────────────────────────────
     console.print(f"\n[bold]Evaluating on holdout set ({len(dataset.holdout)} examples)[/bold]")
@@ -298,18 +318,20 @@ def evolve(
 @click.option("--eval-source", default="synthetic", type=click.Choice(["synthetic", "golden", "sessiondb"]),
               help="Source for evaluation dataset")
 @click.option("--dataset-path", default=None, help="Path to existing eval dataset (JSONL)")
+@click.option("--dataset-size", default=None, type=int, help="Total eval examples to generate (default 20)")
 @click.option("--optimizer-model", default="openai/gpt-4.1", help="Model for GEPA reflections")
 @click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model for evaluations")
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests", is_flag=True, help="Run full pytest suite as constraint gate")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
-def main(skill, iterations, eval_source, dataset_path, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
+def main(skill, iterations, eval_source, dataset_path, dataset_size, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
         skill_name=skill,
         iterations=iterations,
         eval_source=eval_source,
         dataset_path=dataset_path,
+        dataset_size=dataset_size,
         optimizer_model=optimizer_model,
         eval_model=eval_model,
         hermes_repo=hermes_repo,
