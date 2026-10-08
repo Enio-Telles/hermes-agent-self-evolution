@@ -1,6 +1,7 @@
 """Configuration and hermes-agent repo discovery."""
 
 import os
+from urllib.parse import urlsplit
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -115,3 +116,29 @@ def make_lm(model: str):
     if base:
         kwargs = {"api_base": base, "api_key": os.getenv("HERMES_EVOLVE_API_KEY", "local")}
     return dspy.LM(model, **kwargs)
+
+
+def require_approved_model_egress(allow_remote_data: bool = False) -> None:
+    """Require explicit consent before sending evolution data off-host.
+
+    With no custom base URL, DSPy may call a default external provider.
+    This preflight is not a substitute for network-level egress controls.
+    """
+    base = os.getenv("HERMES_EVOLVE_API_BASE")
+    if not base:
+        if not allow_remote_data:
+            raise ValueError(
+                "An implicit remote model may receive skill and evaluation data; "
+                "set HERMES_EVOLVE_API_BASE to loopback or opt in with "
+                "--allow-remote-data."
+            )
+        return
+    parsed = urlsplit(base)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None):
+        raise ValueError("Invalid model URL: use http(s) without embedded credentials")
+    if parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"} and not allow_remote_data:
+        raise ValueError(
+            "A remote model may receive skill and evaluation data; opt in "
+            "with --allow-remote-data only after approving the provider."
+        )

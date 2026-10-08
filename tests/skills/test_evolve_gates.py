@@ -18,6 +18,7 @@ def test_invalid_dataset_size_rejected_before_running():
 
 
 def test_gepa_error_does_not_silently_fall_back(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_EVOLVE_API_BASE", "http://127.0.0.1:8090/v1")
     repo = tmp_path / "hermes-agent"
     skill = repo / "skills" / "test" / "SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -54,6 +55,7 @@ def test_gepa_error_does_not_silently_fall_back(monkeypatch, tmp_path):
 
 
 def test_empty_holdout_stops_before_optimizer(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_EVOLVE_API_BASE", "http://127.0.0.1:8090/v1")
     repo = tmp_path / "hermes-agent"
     skill = repo / "skills" / "test" / "SKILL.md"
     skill.parent.mkdir(parents=True)

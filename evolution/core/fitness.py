@@ -5,6 +5,7 @@ Supports length penalties and multi-dimensional scoring.
 """
 
 import dspy
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -146,11 +147,48 @@ def skill_fitness_metric(
     return min(1.0, max(0.0, score))
 
 
+def make_skill_metric(config: EvolutionConfig, skill_text: str, mode: str = "judge"):
+    """Build GEPA's score-with-feedback metric; judge is the default.
+
+    Heuristic mode is for cost-limited debugging, never for promotion.
+    """
+    if mode not in {"judge", "heuristic"}:
+        raise ValueError("Unknown metric mode: " + str(mode))
+
+    judge = LLMJudge(config) if mode == "judge" else None
+
+    def metric(example, prediction, trace=None, pred_name=None, pred_trace=None):
+        output = str(getattr(prediction, "output", "") or "")
+        if not output.strip():
+            return dspy.Prediction(score=0.0, feedback="Empty output: task was not completed.")
+
+        if mode == "heuristic":
+            score = skill_fitness_metric(example, prediction, trace, pred_name, pred_trace)
+            return dspy.Prediction(
+                score=score,
+                feedback="Heuristic keyword overlap only: correctness was not semantically verified.",
+            )
+
+        result = judge.score(
+            task_input=str(getattr(example, "task_input", "")),
+            expected_behavior=str(getattr(example, "expected_behavior", "")),
+            agent_output=output,
+            skill_text=str(getattr(prediction, "skill_text", skill_text)),
+        )
+        feedback = result.feedback.strip() or (
+            "Review correctness, procedure compliance and conciseness."
+        )
+        return dspy.Prediction(score=result.composite, feedback=feedback)
+
+    return metric
+
+
 def _parse_score(value) -> float:
     """Parse a score value, handling various LLM output formats."""
-    if isinstance(value, (int, float)):
-        return min(1.0, max(0.0, float(value)))
     try:
-        return min(1.0, max(0.0, float(str(value).strip())))
-    except (ValueError, TypeError):
-        return 0.5  # Default to neutral on parse failure
+        score = float(str(value).strip())
+    except (ValueError, TypeError) as error:
+        raise ValueError("Judge returned a non-numeric score") from error
+    if not math.isfinite(score):
+        raise ValueError("Judge returned a non-finite score")
+    return min(1.0, max(0.0, score))
