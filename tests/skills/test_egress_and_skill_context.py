@@ -3,7 +3,8 @@
 import dspy
 import pytest
 
-from evolution.core.config import EvolutionConfig, require_approved_model_egress
+from evolution.core import config
+from evolution.core.config import EvolutionConfig
 from evolution.core.fitness import FitnessScore, LLMJudge, make_skill_metric
 from evolution.skills.skill_module import SkillModule
 from evolution.skills.evolve_skill import evolve
@@ -12,14 +13,14 @@ from evolution.skills.evolve_skill import evolve
 def test_remote_endpoint_requires_explicit_consent(monkeypatch):
     monkeypatch.setenv("HERMES_EVOLVE_API_BASE", "https://model.example.com/v1")
     with pytest.raises(ValueError, match="remote model"):
-        require_approved_model_egress(allow_remote_data=False)
-    require_approved_model_egress(allow_remote_data=True)
+        config.require_approved_model_egress(allow_remote_data=False)
+    config.require_approved_model_egress(allow_remote_data=True)
 
 
 def test_implicit_provider_requires_explicit_consent(monkeypatch):
     monkeypatch.delenv("HERMES_EVOLVE_API_BASE", raising=False)
     with pytest.raises(ValueError, match="remote model"):
-        require_approved_model_egress(allow_remote_data=False)
+        config.require_approved_model_egress(allow_remote_data=False)
 
 
 @pytest.mark.parametrize("endpoint", [
@@ -29,7 +30,7 @@ def test_implicit_provider_requires_explicit_consent(monkeypatch):
 ])
 def test_loopback_endpoint_does_not_require_remote_consent(monkeypatch, endpoint):
     monkeypatch.setenv("HERMES_EVOLVE_API_BASE", endpoint)
-    require_approved_model_egress(allow_remote_data=False)
+    config.require_approved_model_egress(allow_remote_data=False)
 
 
 @pytest.mark.parametrize("endpoint", [
@@ -42,7 +43,7 @@ def test_loopback_endpoint_does_not_require_remote_consent(monkeypatch, endpoint
 def test_unsafe_or_remote_endpoints_blocked_without_consent(monkeypatch, endpoint):
     monkeypatch.setenv("HERMES_EVOLVE_API_BASE", endpoint)
     with pytest.raises(ValueError):
-        require_approved_model_egress(allow_remote_data=False)
+        config.require_approved_model_egress(allow_remote_data=False)
 
 
 def test_evolve_checks_egress_policy_before_building_dataset(monkeypatch):
