@@ -88,6 +88,32 @@ a pull request.** A maintainer must inspect the diff, check behavior-specific
 tests, and submit a separate reviewed change. A passing general pytest suite
 does not by itself establish that the evolved skill's behavior is correct.
 
+## Governed Fitness v2 and skill learning log
+
+The default skill optimization metric uses `LLMJudge` to produce a structured
+correctness/procedure/conciseness score plus **textual feedback** for GEPA.
+This sends the approved evaluation tasks, outputs and original skill instructions
+to the configured evaluation model; review data sensitivity and provider routing
+before running with real sessions. Avoid sensitive/secret-containing datasets.
+
+`--metric-mode heuristic` remains available for inexpensive experiments,
+but **cannot** make a candidate eligible for review. The default
+`--min-improvement 0.02` requires a positive absolute holdout score gain.
+Candidate constraints and test-suite completion are mandatory for review
+eligibility. `--no-run-tests` is permitted for exploration but will mark the
+candidate as rejected for review purposes. No mode installs or publishes a skill.
+
+A metadata-only SQLite record is written to `output/skill_learning.sqlite3`.
+It contains hashes of baseline/candidate texts, dataset fingerprint, model
+identifiers, score summaries, test status and review decision. It never writes
+raw prompts, skills, responses or session traces to that database. Run artifacts
+may still contain candidate text and datasets on disk; treat those directories
+as sensitive when used with real session data.
+
+The log captures completed comparisons and early candidate/test/optimizer
+rejections, but it is not yet a continuous feedback service. Human review is
+still required to actually publish the candidate.
+
 ## Full Plan
 
 See [PLAN.md](PLAN.md) for the complete architecture, evaluation data strategy, constraints, benchmarks integration, and phased timeline.
