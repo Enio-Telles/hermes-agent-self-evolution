@@ -5,6 +5,7 @@ Usage:
     python -m evolution.skills.evolve_skill --skill arxiv --eval-source golden --dataset datasets/skills/arxiv/
 """
 
+import hashlib
 import json
 import sys
 import time
@@ -21,7 +22,8 @@ from rich.table import Table
 from evolution.core.config import EvolutionConfig, resolve_hermes_agent_path, make_lm
 from evolution.core.dataset_builder import SyntheticDatasetBuilder, EvalDataset, GoldenDatasetLoader
 from evolution.core.external_importers import build_dataset_from_external
-from evolution.core.fitness import skill_fitness_metric, LLMJudge, FitnessScore
+from evolution.core.fitness import make_skill_metric
+from evolution.core.learning_registry import LearningRegistry, decide_candidate
 from evolution.core.constraints import ConstraintValidator
 from evolution.skills.skill_module import (
     SkillModule,
@@ -44,8 +46,15 @@ def evolve(
     run_tests: bool = True,
     dry_run: bool = False,
     dataset_size: Optional[int] = None,
+    metric_mode: str = "judge",
+    min_improvement: float = 0.02,
 ):
     """Main evolution function — orchestrates the full optimization loop."""
+
+    if metric_mode not in {"judge", "heuristic"}:
+        raise ValueError("metric_mode must be judge or heuristic")
+    if not 0 < min_improvement <= 1:
+        raise ValueError("min_improvement must be in (0, 1]")
 
     config = EvolutionConfig(
         hermes_agent_path=resolve_hermes_agent_path(hermes_repo),
@@ -122,6 +131,30 @@ def evolve(
     if not dataset.train or not dataset.val or not dataset.holdout:
         raise ValueError("Evaluation requires non-empty train, val and holdout splits")
 
+    # Do not persist raw dataset/session content to the registry.
+    dataset_fingerprint = hashlib.sha256(json.dumps(
+        [example.to_dict() for example in dataset.all_examples],
+        sort_keys=True, ensure_ascii=False,
+    ).encode("utf-8")).hexdigest()
+    registry = LearningRegistry(Path("output") / "skill_learning.sqlite3")
+
+    def audit(decision, reason, candidate_text, baseline_score=None,
+              candidate_score=None, tests_passed=None):
+        return registry.record(
+            skill_name=skill_name,
+            baseline_text=skill["raw"],
+            candidate_text=candidate_text,
+            dataset_fingerprint=dataset_fingerprint,
+            baseline_score=baseline_score,
+            candidate_score=candidate_score,
+            decision=decision,
+            reason=reason,
+            metric_mode=metric_mode,
+            optimizer_model=optimizer_model,
+            eval_model=eval_model,
+            tests_passed=tests_passed,
+        )
+
     # ── 3. Validate constraints on baseline ─────────────────────────────
     console.print(f"\n[bold]Validating baseline constraints[/bold]")
     validator = ConstraintValidator(config)
@@ -149,8 +182,9 @@ def evolve(
     lm = make_lm(eval_model)
     dspy.configure(lm=lm)
 
-    # Create the baseline skill module
+    # Create the baseline skill module and GEPA's feedback metric.
     baseline_module = SkillModule(skill["body"])
+    metric = make_skill_metric(config, skill["body"], mode=metric_mode)
 
     # Prepare DSPy examples
     trainset = dataset.to_dspy_examples("train")
@@ -163,15 +197,19 @@ def evolve(
 
     # Do not mask GEPA errors with an unrelated optimizer fallback.
     optimizer = dspy.GEPA(
-        metric=skill_fitness_metric,
+        metric=metric,
         max_full_evals=iterations,
         reflection_lm=make_lm(optimizer_model),
     )
-    optimized_module = optimizer.compile(
-        baseline_module,
-        trainset=trainset,
-        valset=valset,
-    )
+    try:
+        optimized_module = optimizer.compile(
+            baseline_module,
+            trainset=trainset,
+            valset=valset,
+        )
+    except Exception:
+        audit("rejected", "optimizer_failed", skill["raw"])
+        raise
 
     elapsed = time.time() - start_time
     console.print(f"\n  Optimization completed in {elapsed:.1f}s")
@@ -199,9 +237,11 @@ def evolve(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(evolved_full)
         console.print(f"  Saved failed variant to {output_path}")
+        audit("rejected", "constraints_failed", evolved_full)
         return
 
     # Guardrail: full hermes-agent test suite gate (README rule 1)
+    tests_passed = None
     if config.run_pytest and config.hermes_agent_path:
         console.print("\n[bold]Running hermes-agent test suite[/bold]")
         test_result = validator.run_test_suite(
@@ -209,10 +249,12 @@ def evolve(
         )
         icon = "✓" if test_result.passed else "✗"
         console.print(f"  {icon} {test_result.constraint_name}: {test_result.message}")
+        tests_passed = test_result.passed
         if not test_result.passed:
             if test_result.details:
                 console.print(f"  {test_result.details}")
             console.print("[red]✗ Test suite FAILED — not deploying[/red]")
+            audit("rejected", "candidate_tests_failed", evolved_full, tests_passed=False)
             return
 
     # ── 8. Evaluate on holdout set ──────────────────────────────────────
@@ -226,16 +268,25 @@ def evolve(
         # Score baseline
         with dspy.context(lm=lm):
             baseline_pred = baseline_module(task_input=ex.task_input)
-            baseline_score = skill_fitness_metric(ex, baseline_pred)
+            baseline_score = float(metric(ex, baseline_pred).score)
             baseline_scores.append(baseline_score)
 
             evolved_pred = optimized_module(task_input=ex.task_input)
-            evolved_score = skill_fitness_metric(ex, evolved_pred)
+            evolved_score = float(metric(ex, evolved_pred).score)
             evolved_scores.append(evolved_score)
 
     avg_baseline = sum(baseline_scores) / max(1, len(baseline_scores))
     avg_evolved = sum(evolved_scores) / max(1, len(evolved_scores))
     improvement = avg_evolved - avg_baseline
+    decision, reason = decide_candidate(
+        avg_baseline, avg_evolved, constraints_passed=all_pass,
+        tests_passed=tests_passed, metric_mode=metric_mode,
+        min_improvement=min_improvement,
+    )
+    run_id = audit(
+        decision, reason, evolved_full, baseline_score=avg_baseline,
+        candidate_score=avg_evolved, tests_passed=tests_passed,
+    )
 
     # ── 9. Report results ───────────────────────────────────────────────
     table = Table(title="Evolution Results")
@@ -291,10 +342,17 @@ def evolve(
         "holdout_examples": len(dataset.holdout),
         "elapsed_seconds": elapsed,
         "constraints_passed": all_pass,
+        "metric_mode": metric_mode,
+        "minimum_improvement": min_improvement,
+        "review_decision": decision,
+        "review_reason": reason,
+        "learning_run_id": run_id,
+        "tests_passed": tests_passed,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
     console.print(f"\n  Output saved to {output_dir}/")
+    console.print(f"  Review gate: {decision} ({reason}); registry ID: {run_id}")
 
     if improvement > 0:
         console.print(f"\n[bold green]✓ Evolution improved skill by {improvement:+.3f} ({improvement/max(0.001, avg_baseline)*100:+.1f}%)[/bold green]")
@@ -311,12 +369,14 @@ def evolve(
               help="Source for evaluation dataset")
 @click.option("--dataset-path", default=None, help="Path to existing eval dataset (JSONL)")
 @click.option("--dataset-size", default=None, type=click.IntRange(min=3), help="Total eval examples to generate (default 20)")
+@click.option("--metric-mode", type=click.Choice(["judge", "heuristic"]), default="judge", help="Judge returns semantic feedback; heuristic is non-promotable")
+@click.option("--min-improvement", type=click.FloatRange(min=0, max=1, min_open=True), default=0.02, help="Minimum absolute holdout gain before manual review")
 @click.option("--optimizer-model", default="openai/gpt-4.1", help="Model for GEPA reflections")
 @click.option("--eval-model", default="openai/gpt-4.1-mini", help="Model for evaluations")
 @click.option("--hermes-repo", default=None, help="Path to hermes-agent repo")
 @click.option("--run-tests/--no-run-tests", default=True, help="Run full pytest suite against the isolated candidate (default: on)")
 @click.option("--dry-run", is_flag=True, help="Validate setup without running optimization")
-def main(skill, iterations, eval_source, dataset_path, dataset_size, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
+def main(skill, iterations, eval_source, dataset_path, dataset_size, metric_mode, min_improvement, optimizer_model, eval_model, hermes_repo, run_tests, dry_run):
     """Evolve a Hermes Agent skill using DSPy + GEPA optimization."""
     evolve(
         skill_name=skill,
@@ -324,6 +384,8 @@ def main(skill, iterations, eval_source, dataset_path, dataset_size, optimizer_m
         eval_source=eval_source,
         dataset_path=dataset_path,
         dataset_size=dataset_size,
+        metric_mode=metric_mode,
+        min_improvement=min_improvement,
         optimizer_model=optimizer_model,
         eval_model=eval_model,
         hermes_repo=hermes_repo,
